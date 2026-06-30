@@ -9,6 +9,7 @@ interface EmailReportModalProps {
   reportName: string;
   reportId: string;
   emailHtml?: string;
+  inspection?: any; // Full inspection data for generating comprehensive email
 }
 
 type EmailStep = 'review' | 'sending' | 'success' | 'failed';
@@ -26,6 +27,7 @@ export default function EmailReportModal({
   reportName,
   reportId,
   emailHtml,
+  inspection,
 }: EmailReportModalProps) {
   const [step, setStep] = useState<EmailStep>('review');
   const [sendingTo, setSendingTo] = useState('');
@@ -52,7 +54,7 @@ export default function EmailReportModal({
 
     // Build the email HTML content
     const subject = `MeInspect Report: ${reportName} (RPT-${reportId.slice(0, 8).toUpperCase()})`;
-    const html = emailHtml || generateDefaultEmailHtml(reportName, reportId);
+    const html = emailHtml || generateDefaultEmailHtml(reportName, reportId, inspection);
 
     let totalSuccess = 0;
     let totalFailed = 0;
@@ -64,7 +66,7 @@ export default function EmailReportModal({
       setSentCount(i);
 
       try {
-        const response = await client.api.fetch('/api/public/send-email', {
+        const response = await client.api.fetch('/api/send-email', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -106,7 +108,7 @@ export default function EmailReportModal({
     } else {
       setStep('success');
     }
-  }, [recipients, selectedRecipients, reportName, reportId, emailHtml]);
+  }, [recipients, selectedRecipients, reportName, reportId, emailHtml, inspection]);
 
   const toggleRecipient = (email: string) => {
     setSelectedRecipients(prev =>
@@ -316,7 +318,87 @@ export default function EmailReportModal({
 }
 
 // Default email HTML template
-function generateDefaultEmailHtml(reportName: string, reportId: string): string {
+function generateDefaultEmailHtml(reportName: string, reportId: string, inspection?: any): string {
+  // Compute summary stats if inspection data is available
+  let totalRooms = 0;
+  let totalItems = 0;
+  let checkedItems = 0;
+  let issuesFound = 0;
+  let totalPhotos = 0;
+  let roomSummaries: { name: string; icon: string; checked: number; total: number; issues: number }[] = [];
+
+  if (inspection) {
+    totalRooms = inspection.rooms?.length || 0;
+    totalPhotos = (inspection.overallPhotos?.length || 0) +
+      (inspection.rooms?.reduce((acc: number, r: any) => acc + r.items.reduce((a: number, i: any) => a + (i.photos?.length || 0), 0), 0) || 0);
+
+    roomSummaries = (inspection.rooms || []).map((room: any) => {
+      const items = room.items || [];
+      const nonGeneral = items.filter((i: any) => i.name !== 'General');
+      const checked = nonGeneral.filter((i: any) => i.checked).length;
+      const issues = nonGeneral.filter((i: any) => i.condition === 'damaged' || i.condition === 'poor').length;
+      totalItems += nonGeneral.length;
+      checkedItems += checked;
+      issuesFound += issues;
+      return { name: room.name, icon: room.icon, checked, total: nonGeneral.length, issues };
+    });
+  }
+
+  const completionPct = totalItems > 0 ? Math.round((checkedItems / totalItems) * 100) : 0;
+  const propertyAddress = inspection ? [
+    inspection.property?.area,
+    inspection.property?.city,
+  ].filter(Boolean).join(', ') : '';
+  const propertyType = inspection?.propertyType || '';
+  const inspectorName = inspection?.meta?.inspectorName || '';
+  const completedDate = inspection?.completedAt || inspection?.updatedAt || new Date().toISOString();
+  const formattedDate = new Date(completedDate).toLocaleDateString('en-AE', { day: '2-digit', month: 'short', year: 'numeric' });
+  const gpsInfo = inspection?.meta?.location
+    ? `${inspection.meta.location.latitude.toFixed(4)}, ${inspection.meta.location.longitude.toFixed(4)}`
+    : '';
+
+  // Build room summary rows
+  const roomRows = roomSummaries.map(r => `
+    <tr>
+      <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:14px;color:#334155;">
+        <span style="margin-right:6px;">${r.icon}</span> ${r.name}
+      </td>
+      <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:14px;color:#64748b;text-align:center;">
+        ${r.checked}/${r.total}
+      </td>
+      <td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;font-size:14px;text-align:center;">
+        ${r.issues > 0
+          ? `<span style="color:#dc2626;font-weight:600;">⚠ ${r.issues}</span>`
+          : `<span style="color:#059669;">✓</span>`
+        }
+      </td>
+    </tr>
+  `).join('');
+
+  // Signature status
+  const sigCount = inspection?.signatures?.length || 0;
+  const sigStatus = sigCount >= 3
+    ? '<span style="color:#059669;font-weight:600;">✓ All signatures collected</span>'
+    : `<span style="color:#d97706;">${sigCount}/3 signatures collected</span>`;
+
+  // GPS status
+  const gpsStatus = gpsInfo
+    ? `<span style="color:#059669;">📍 ${gpsInfo}</span>`
+    : '<span style="color:#94a3b8;">GPS data not available</span>';
+
+  // PDF download section
+  const hasPdf = inspection?.pdfUrl;
+  const pdfSection = hasPdf
+    ? `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:20px;margin:24px 0;text-align:center;">
+        <p style="color:#166534;font-size:14px;font-weight:600;margin:0 0 8px 0;">📄 Full Report Available</p>
+        <p style="color:#166534;font-size:13px;margin:0 0 16px 0;">The complete PDF report with photos, condition assessments, and digital signatures is ready for download.</p>
+        <p style="color:#94a3b8;font-size:12px;margin:0;">Open the MeInspect app to download the PDF report.</p>
+      </div>`
+    : `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:20px;margin:24px 0;text-align:center;">
+        <p style="color:#64748b;font-size:13px;margin:0;">Open the MeInspect app to generate and download the full PDF report.</p>
+      </div>`;
+
+  // Build the full HTML
   return `
     <!DOCTYPE html>
     <html>
@@ -327,30 +409,157 @@ function generateDefaultEmailHtml(reportName: string, reportId: string): string 
     <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background-color:#f1f5f9;">
       <div style="max-width:600px;margin:0 auto;background:#ffffff;">
         <!-- Header -->
-        <div style="background:linear-gradient(135deg,#2563eb,#4f46e5);padding:32px 24px;text-align:center;">
-          <h1 style="color:#ffffff;font-size:24px;margin:0 0 8px 0;">MeInspect</h1>
+        <div style="background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 50%,#3b82f6 100%);padding:32px 24px;text-align:center;">
+          <h1 style="color:#ffffff;font-size:24px;margin:0 0 8px 0;font-weight:800;">MeInspect</h1>
           <p style="color:#c7d2fe;font-size:14px;margin:0;">Property Condition Report</p>
         </div>
+
         <!-- Body -->
         <div style="padding:32px 24px;">
-          <h2 style="color:#1e293b;font-size:20px;margin:0 0 16px 0;">Your Inspection Report</h2>
-          <p style="color:#475569;font-size:15px;line-height:1.6;margin:0 0 16px 0;">
-            Please find your property condition report below. This report has been generated by MeInspect and contains a comprehensive assessment of the property's condition.
+          <!-- Report Title -->
+          <h2 style="color:#1e293b;font-size:20px;margin:0 0 8px 0;font-weight:700;">Inspection Report: ${reportName}</h2>
+          <p style="color:#64748b;font-size:13px;margin:0 0 24px 0;">
+            RPT-${reportId.slice(0, 8).toUpperCase()} · ${formattedDate}
           </p>
-          <div style="background:#f8fafc;border-radius:12px;padding:16px;margin:16px 0;border:1px solid #e2e8f0;">
-            <p style="color:#64748b;font-size:13px;margin:0 0 4px 0;">Report Name</p>
-            <p style="color:#1e293b;font-size:15px;font-weight:600;margin:0 0 12px 0;">${reportName}</p>
-            <p style="color:#64748b;font-size:13px;margin:0 0 4px 0;">Report ID</p>
-            <p style="color:#1e293b;font-size:15px;font-weight:600;margin:0;font-family:monospace;">RPT-${reportId.slice(0, 8).toUpperCase()}</p>
+
+          <!-- Property Details -->
+          ${inspection ? `
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:0 0 20px 0;">
+            <p style="color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 12px 0;">Property Details</p>
+            <table style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td style="padding:4px 0;font-size:13px;color:#64748b;width:40%;">Type</td>
+                <td style="padding:4px 0;font-size:13px;color:#1e293b;font-weight:500;">${propertyType.charAt(0).toUpperCase() + propertyType.slice(1)}</td>
+              </tr>
+              ${propertyAddress ? `
+              <tr>
+                <td style="padding:4px 0;font-size:13px;color:#64748b;">Address</td>
+                <td style="padding:4px 0;font-size:13px;color:#1e293b;font-weight:500;">${propertyAddress}</td>
+              </tr>` : ''}
+              ${inspection.property?.buildingName ? `
+              <tr>
+                <td style="padding:4px 0;font-size:13px;color:#64748b;">Building</td>
+                <td style="padding:4px 0;font-size:13px;color:#1e293b;font-weight:500;">${inspection.property.buildingName}</td>
+              </tr>` : ''}
+              ${inspection.property?.unitNumber ? `
+              <tr>
+                <td style="padding:4px 0;font-size:13px;color:#64748b;">Unit</td>
+                <td style="padding:4px 0;font-size:13px;color:#1e293b;font-weight:500;">${inspection.property.unitNumber}</td>
+              </tr>` : ''}
+              ${inspection.property?.totalAreaSqft ? `
+              <tr>
+                <td style="padding:4px 0;font-size:13px;color:#64748b;">Area</td>
+                <td style="padding:4px 0;font-size:13px;color:#1e293b;font-weight:500;">${inspection.property.totalAreaSqft} sq ft</td>
+              </tr>` : ''}
+            </table>
           </div>
-          <p style="color:#475569;font-size:15px;line-height:1.6;margin:16px 0 0 0;">
-            To view the full report, please open the MeInspect application and navigate to your inspection history.
+          ` : ''}
+
+          <!-- Summary Stats -->
+          ${inspection ? `
+          <div style="display:flex;gap:12px;margin:0 0 20px 0;">
+            <div style="flex:1;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;text-align:center;">
+              <p style="color:#2563eb;font-size:24px;font-weight:800;margin:0;">${totalRooms}</p>
+              <p style="color:#64748b;font-size:11px;margin:4px 0 0 0;">Rooms</p>
+            </div>
+            <div style="flex:1;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:14px;text-align:center;">
+              <p style="color:#059669;font-size:24px;font-weight:800;margin:0;">${completionPct}%</p>
+              <p style="color:#64748b;font-size:11px;margin:4px 0 0 0;">Complete</p>
+            </div>
+            <div style="flex:1;background:${issuesFound > 0 ? '#fef2f2' : '#f8fafc'};border:1px solid ${issuesFound > 0 ? '#fecaca' : '#e2e8f0'};border-radius:10px;padding:14px;text-align:center;">
+              <p style="color:${issuesFound > 0 ? '#dc2626' : '#64748b'};font-size:24px;font-weight:800;margin:0;">${issuesFound}</p>
+              <p style="color:#64748b;font-size:11px;margin:4px 0 0 0;">Issues</p>
+            </div>
+            <div style="flex:1;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px;text-align:center;">
+              <p style="color:#1e293b;font-size:24px;font-weight:800;margin:0;">${totalPhotos}</p>
+              <p style="color:#64748b;font-size:11px;margin:4px 0 0 0;">Photos</p>
+            </div>
+          </div>
+          ` : ''}
+
+          <!-- Room-by-Room Summary -->
+          ${roomSummaries.length > 0 ? `
+          <div style="margin:0 0 20px 0;">
+            <p style="color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">Room Assessment</p>
+            <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+              <thead>
+                <tr style="background:#f8fafc;">
+                  <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;">Room</th>
+                  <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;">Items</th>
+                  <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.5px;border-bottom:2px solid #e2e8f0;">Issues</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${roomRows}
+              </tbody>
+            </table>
+          </div>
+          ` : ''}
+
+          <!-- Parties -->
+          ${inspection ? `
+          <div style="margin:0 0 20px 0;">
+            <p style="color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">Inspection Parties</p>
+            <div style="display:flex;gap:12px;">
+              ${inspection.landlord?.name ? `
+              <div style="flex:1;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;">
+                <p style="color:#92400e;font-size:10px;font-weight:700;text-transform:uppercase;margin:0 0 4px 0;">🏢 Landlord</p>
+                <p style="color:#78350f;font-size:13px;font-weight:600;margin:0;">${inspection.landlord.name}</p>
+              </div>` : ''}
+              ${inspection.tenant?.name ? `
+              <div style="flex:1;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;">
+                <p style="color:#1e40af;font-size:10px;font-weight:700;text-transform:uppercase;margin:0 0 4px 0;">👤 Tenant</p>
+                <p style="color:#1e3a8a;font-size:13px;font-weight:600;margin:0;">${inspection.tenant.name}</p>
+              </div>` : ''}
+              ${inspectorName ? `
+              <div style="flex:1;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;">
+                <p style="color:#166534;font-size:10px;font-weight:700;text-transform:uppercase;margin:0 0 4px 0;">🔍 Inspector</p>
+                <p style="color:#166534;font-size:13px;font-weight:600;margin:0;">${inspectorName}</p>
+              </div>` : ''}
+            </div>
+          </div>
+          ` : ''}
+
+          <!-- PDF Download -->
+          ${pdfSection}
+
+          <!-- Verification Info -->
+          ${inspection ? `
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:0 0 20px 0;">
+            <p style="color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin:0 0 10px 0;">Verification</p>
+            <table style="width:100%;border-collapse:collapse;">
+              <tr>
+                <td style="padding:4px 0;font-size:12px;color:#64748b;">Signatures</td>
+                <td style="padding:4px 0;font-size:12px;">${sigStatus}</td>
+              </tr>
+              <tr>
+                <td style="padding:4px 0;font-size:12px;color:#64748b;">GPS Location</td>
+                <td style="padding:4px 0;font-size:12px;">${gpsStatus}</td>
+              </tr>
+              <tr>
+                <td style="padding:4px 0;font-size:12px;color:#64748b;">Report ID</td>
+                <td style="padding:4px 0;font-size:12px;color:#1e293b;font-family:monospace;">${reportId}</td>
+              </tr>
+            </table>
+          </div>
+          ` : ''}
+
+          <!-- Message -->
+          <p style="color:#475569;font-size:14px;line-height:1.6;margin:0 0 16px 0;">
+            This property condition report has been prepared using MeInspect. It contains timestamped, geotagged photographic evidence and detailed condition assessments for all inspected areas.
+          </p>
+          <p style="color:#475569;font-size:14px;line-height:1.6;margin:0;">
+            For the complete report with all photos, condition details, and digital signatures, please open the MeInspect application or contact the inspector directly.
           </p>
         </div>
+
         <!-- Footer -->
         <div style="background:#f8fafc;padding:24px;text-align:center;border-top:1px solid #e2e8f0;">
-          <p style="color:#94a3b8;font-size:12px;margin:0;">
-            This email was sent by MeInspect — Property Condition Reporting Platform
+          <p style="color:#94a3b8;font-size:12px;margin:0 0 4px 0;">
+            This email was sent by <strong style="color:#64748b;">MeInspect</strong> — Professional Property Condition Reports
+          </p>
+          <p style="color:#cbd5e1;font-size:11px;margin:0;">
+            All data including timestamps, GPS coordinates, and digital signatures are embedded for report authenticity.
           </p>
         </div>
       </div>

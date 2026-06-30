@@ -48,14 +48,20 @@ Backend (Cloudflare Workers + D1)
 - **Authentication**: Youware platform auth via X-Encrypted-Yw-ID header
 - **Database**: Cloudflare D1 (SQLite-compatible) with user-scoped data
 - **API Endpoints**:
-  - `GET/POST /api/inspections` — List/create inspections
-  - `GET/PUT/DELETE /api/inspections/:id` — CRUD single inspection (PUT returns 404 if not found)
-  - `POST /api/inspections/:id/rooms` — Add rooms
-  - `POST /api/inspections/:id/signatures` — Add signatures
-  - `POST /api/inspections/:id/photos` — Add photos
-  - `POST /api/send-email` — Send report email via Resend API (requires RESEND_API_KEY secret)
-  - `GET /api/sync/inspections` — Fetch all inspections from cloud for a user
-  - `POST /api/sync/push` — Push local inspections to cloud
+  - `GET/POST /api/inspections` — List/create inspections (authenticated, user-scoped)
+  - `GET/PUT/DELETE /api/inspections/:id` — CRUD single inspection (authenticated, ownership-verified)
+  - `POST /api/send-email` — Send report email via Resend API (authenticated, requires RESEND_API_KEY secret)
+  - `GET /api/sync/inspections` — Fetch all inspections from cloud for a user (authenticated)
+  - `POST /api/sync/push` — Push local inspections to cloud (authenticated)
+  - `POST /api/upload/pdf` — Presigned PDF upload URL (authenticated, ownership-verified)
+  - `GET /api/download/pdf/:inspectionId` — Presigned PDF download (authenticated, ownership-verified)
+  - `POST /api/upload/photo` — Presigned photo upload URL (authenticated, ownership-verified)
+  - `GET /api/download/photo` — Presigned photo download (authenticated, path-ownership-verified)
+  - `POST /api/user/profile` — Save/update user profile (authenticated)
+  - `GET /api/user/profile` — Get own user profile (authenticated)
+  - `POST /api/checkout` — Create payment session (authenticated)
+  - `GET/POST /api/orders` — Payment history (authenticated)
+- **Security**: All endpoints enforce user ownership via `requireOwnership()` helper
 
 ## Database Schema
 - `users` — User accounts synced from Youware auth

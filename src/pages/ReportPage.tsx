@@ -1304,6 +1304,7 @@ export default function ReportPage() {
         ]}
         reportName={propertyDisplayName}
         reportId={inspection.id}
+        inspection={inspection}
       />
     </div>
   );

@@ -3,8 +3,6 @@ import type { Client } from "@sdk/server-types";
 import { tables, buckets } from "@generated";
 import { eq, and } from "drizzle-orm";
 
-const PROVIDER = 'stripe';
-
 function getEnv(): "staging" | "production" {
   return "staging";
 }
@@ -12,6 +10,28 @@ function getEnv(): "staging" | "production" {
 function tryParse(json: string | null | undefined): any {
   if (!json) return {};
   try { return JSON.parse(json); } catch { return {}; }
+}
+
+/**
+ * Verify that the authenticated user owns the given inspection.
+ * Returns the inspection row if authorized, or sends an error response and returns null.
+ */
+async function requireOwnership(
+  edgespark: Client<typeof tables>,
+  userId: string,
+  inspectionId: string
+): Promise<any | null> {
+  const rows = await edgespark.db
+    .select()
+    .from(tables.inspections)
+    .where(
+      and(
+        eq(tables.inspections.id, inspectionId),
+        eq(tables.inspections.userId, userId)
+      )
+    );
+  if (rows.length === 0) return null;
+  return rows[0];
 }
 
 export async function createApp(edgespark: Client<typeof tables>): Promise<Hono> {
@@ -23,188 +43,28 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ error: err instanceof Error ? err.message : "Internal error" }, 500);
   });
 
-  // ==================== CUSTOM AUTH ENDPOINTS ====================
-
-  // Sign up (public - no auth required)
-  app.post('/api/public/auth/signup', async (c) => {
-    const { email, password, name, phone, location } = await c.req.json();
-    if (!email || !password || !name) {
-      return c.json({ error: 'Email, password, and name are required' }, 400);
-    }
-
-    // Check if user already exists
-    const existing = await edgespark.db.select().from(tables.users).where(eq(tables.users.email, email));
-    if (existing.length > 0) {
-      return c.json({ error: 'An account with this email already exists' }, 409);
-    }
-
-    // Hash password using Web Crypto API (PBKDF2)
-    const encoder = new TextEncoder();
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', encoder.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
-    );
-    const hash = await crypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
-      keyMaterial, 256
-    );
-    const hashArray = Array.from(new Uint8Array(hash));
-    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
-    const passwordHash = `${saltHex}:${hashHex}`;
-
-    // Create user in our users table
-    await edgespark.db.insert(tables.users).values({
-      id: email,
-      email,
-      name,
-      phone: phone || '',
-      location: location || '',
-      passwordHash,
-    });
-
-    // Generate session token
-    const token = await createToken(email);
-
-    return c.json({
-      success: true,
-      user: { id: email, email, name },
-      token,
-    });
-  });
-
-  // Sign in (public - no auth required)
-  app.post('/api/public/auth/login', async (c) => {
-    const { email, password } = await c.req.json();
-    if (!email || !password) {
-      return c.json({ error: 'Email and password are required' }, 400);
-    }
-
-    // Find user
-    const users = await edgespark.db.select().from(tables.users).where(eq(tables.users.email, email));
-    if (users.length === 0) {
-      return c.json({ error: 'No account found with this email' }, 401);
-    }
-
-    const user = users[0];
-
-    // Verify password
-    if (!user.passwordHash) {
-      return c.json({ error: 'Account has no password set' }, 401);
-    }
-
-    const [saltHex, hashHex] = user.passwordHash.split(':');
-    const encoder = new TextEncoder();
-    const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw', encoder.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
-    );
-    const hash = await crypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
-      keyMaterial, 256
-    );
-    const hashArray = Array.from(new Uint8Array(hash));
-    const computedHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-
-    if (computedHash !== hashHex) {
-      return c.json({ error: 'Incorrect password' }, 401);
-    }
-
-    // Generate session token
-    const token = await createToken(email);
-
-    return c.json({
-      success: true,
-      user: { id: user.id, email: user.email, name: user.name },
-      token,
-    });
-  });
-
-  // Get current user (public - checks token from header)
-  app.get('/api/public/auth/me', async (c) => {
-    const authHeader = c.req.header('Authorization');
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return c.json({ error: 'Not authenticated' }, 401);
-    }
-
-    const token = authHeader.slice(7);
-    const email = await verifyToken(token);
-    if (!email) {
-      return c.json({ error: 'Invalid token' }, 401);
-    }
-
-    const users = await edgespark.db.select().from(tables.users).where(eq(tables.users.email, email));
-    if (users.length === 0) {
-      return c.json({ error: 'User not found' }, 404);
-    }
-
-    const user = users[0];
-    return c.json({
-      user: { id: user.id, email: user.email, name: user.name },
-    });
-  });
-
-  // ==================== TOKEN HELPERS ====================
-
-  async function createToken(email: string): Promise<string> {
-    const encoder = new TextEncoder();
-    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-    const payload = btoa(JSON.stringify({
-      sub: email,
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + 86400 * 7,
-    }));
-    const data = `${header}.${payload}`;
-    const key = await crypto.subtle.importKey(
-      'raw', encoder.encode('meinspect-secret-key-2024'),
-      { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-    );
-    const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
-    const sigHex = Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('');
-    return `${data}.${sigHex}`;
-  }
-
-  async function verifyToken(token: string): Promise<string | null> {
-    try {
-      const [header, payload, sigHex] = token.split('.');
-      if (!header || !payload || !sigHex) return null;
-      const encoder = new TextEncoder();
-      const data = `${header}.${payload}`;
-      const key = await crypto.subtle.importKey(
-        'raw', encoder.encode('meinspect-secret-key-2024'),
-        { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
-      );
-      const sigBytes = new Uint8Array(sigHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
-      const valid = await crypto.subtle.verify('HMAC', key, sigBytes, encoder.encode(data));
-      if (!valid) return null;
-      const payloadData = JSON.parse(atob(payload));
-      if (payloadData.exp < Math.floor(Date.now() / 1000)) return null;
-      return payloadData.sub;
-    } catch {
-      return null;
-    }
-  }
-
   // ==================== USER PROFILE ENDPOINTS ====================
+  // Authenticated endpoints — use edgespark.auth.user for identity
 
-  // Save/update user profile (phone, location) - called after signup
-  app.post('/api/public/user/profile', async (c) => {
-    const { email, phone, location } = await c.req.json();
-    if (!email) return c.json({ error: 'email required' }, 400);
+  // Save/update user profile (phone, location) — authenticated
+  app.post('/api/user/profile', async (c) => {
+    const userId = edgespark.auth.user!.id;
+    const { phone, location } = await c.req.json();
 
     const existing = await edgespark.db.select().from(tables.users)
-      .where(eq(tables.users.email, email));
+      .where(eq(tables.users.email, userId));
 
     if (existing.length > 0) {
       await edgespark.db.update(tables.users).set({
-        phone: phone || existing[0].phone,
-        location: location || existing[0].location,
+        phone: phone !== undefined ? phone : existing[0].phone,
+        location: location !== undefined ? location : existing[0].location,
         updatedAt: new Date().toISOString(),
-      }).where(eq(tables.users.email, email));
+      }).where(eq(tables.users.email, userId));
     } else {
+      // Create user record if it doesn't exist yet
       await edgespark.db.insert(tables.users).values({
-        id: email,
-        email,
+        id: userId,
+        email: userId,
         name: '',
         phone: phone || '',
         location: location || '',
@@ -213,17 +73,18 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ success: true });
   });
 
-  // Get user profile
-  app.get('/api/public/user/profile/:email', async (c) => {
-    const email = c.req.param('email');
+  // Get own user profile — authenticated
+  app.get('/api/user/profile', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const result = await edgespark.db.select().from(tables.users)
-      .where(eq(tables.users.email, email));
+      .where(eq(tables.users.email, userId));
     if (result.length === 0) return c.json({ data: null });
     return c.json({ data: result[0] });
   });
 
   // ==================== INSPECTION ENDPOINTS ====================
-  // /api/* routes auto-enforce authentication via Youbase
+  // All /api/* routes enforce authentication via Youbase.
+  // Additional ownership checks prevent IDOR.
 
   // List inspections for authenticated user
   app.get('/api/inspections', async (c) => {
@@ -233,13 +94,13 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ data: inspections });
   });
 
-  // Get single inspection
+  // Get single inspection — ownership check
   app.get('/api/inspections/:id', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const id = c.req.param('id');
-    const result = await edgespark.db.select().from(tables.inspections)
-      .where(eq(tables.inspections.id, id));
-    if (result.length === 0) return c.json({ error: 'Not found' }, 404);
-    return c.json({ data: result[0] });
+    const row = await requireOwnership(edgespark, userId, id);
+    if (!row) return c.json({ error: 'Not found' }, 404);
+    return c.json({ data: row });
   });
 
   // Create inspection
@@ -270,17 +131,15 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ data: inspection[0] }, 201);
   });
 
-  // Update inspection
+  // Update inspection — ownership check
   app.put('/api/inspections/:id', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const id = c.req.param('id');
     const data = await c.req.json();
 
-    // First check if the inspection exists
-    const existing = await edgespark.db.select().from(tables.inspections)
-      .where(eq(tables.inspections.id, id));
-    if (existing.length === 0) {
-      return c.json({ error: 'Inspection not found' }, 404);
-    }
+    // Ownership check
+    const existing = await requireOwnership(edgespark, userId, id);
+    if (!existing) return c.json({ error: 'Inspection not found' }, 404);
 
     const updateData: Record<string, any> = { updatedAt: new Date().toISOString() };
     if (data.status !== undefined) updateData.status = data.status;
@@ -299,22 +158,33 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     if (data.completedAt !== undefined) updateData.completedAt = data.completedAt;
     if (data.pdfUrl !== undefined) updateData.pdfUrl = data.pdfUrl;
 
-    await edgespark.db.update(tables.inspections).set(updateData).where(eq(tables.inspections.id, id));
+    await edgespark.db.update(tables.inspections).set(updateData)
+      .where(eq(tables.inspections.id, id));
     return c.json({ success: true });
   });
 
-  // Delete inspection
+  // Delete inspection — ownership check
   app.delete('/api/inspections/:id', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const id = c.req.param('id');
-    await edgespark.db.delete(tables.inspections).where(eq(tables.inspections.id, id));
+
+    // Ownership check
+    const existing = await requireOwnership(edgespark, userId, id);
+    if (!existing) return c.json({ error: 'Inspection not found' }, 404);
+
+    await edgespark.db.delete(tables.inspections).where(
+      and(
+        eq(tables.inspections.id, id),
+        eq(tables.inspections.userId, userId)
+      )
+    );
     return c.json({ success: true });
   });
 
   // ==================== EMAIL ENDPOINTS ====================
-  // Public endpoint - no auth required for sending emails
 
   // Send inspection report email via Resend API
-  app.post('/api/public/send-email', async (c) => {
+  app.post('/api/send-email', async (c) => {
     const { to, subject, html, from } = await c.req.json();
     if (!to || !subject || !html) {
       return c.json({ error: 'to, subject, and html are required' }, 400);
@@ -423,9 +293,14 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
 
     for (const inspection of items) {
       try {
-        // Try update first
+        // Check if inspection belongs to this user
         const existing = await edgespark.db.select().from(tables.inspections)
-          .where(eq(tables.inspections.id, inspection.id));
+          .where(
+            and(
+              eq(tables.inspections.id, inspection.id),
+              eq(tables.inspections.userId, userId)
+            )
+          );
 
         const updateData: Record<string, any> = {
           status: inspection.status,
@@ -471,14 +346,16 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
 
   // ==================== STORAGE ENDPOINTS (PDF & Photos) ====================
 
-  // Get presigned upload URL for PDF report
+  // Get presigned upload URL for PDF report — ownership check
   app.post('/api/upload/pdf', async (c) => {
     const { inspectionId } = await c.req.json();
     if (!inspectionId) return c.json({ error: 'inspectionId required' }, 400);
 
     const userId = edgespark.auth.user!.id;
-    const path = `reports/${userId}/${inspectionId}.pdf`;
+    const row = await requireOwnership(edgespark, userId, inspectionId);
+    if (!row) return c.json({ error: 'Inspection not found' }, 404);
 
+    const path = `reports/${userId}/${inspectionId}.pdf`;
     const { uploadUrl, expiresAt } = await edgespark.storage
       .from(buckets.meinspect_reports)
       .createPresignedPutUrl(path, 3600);
@@ -491,16 +368,15 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ uploadUrl, path, expiresAt });
   });
 
-  // Get presigned download URL for PDF report
+  // Get presigned download URL for PDF report — ownership check
   app.get('/api/download/pdf/:inspectionId', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const inspectionId = c.req.param('inspectionId');
 
-    // Verify the inspection exists and belongs to the user
-    const inspection = await edgespark.db.select().from(tables.inspections)
-      .where(eq(tables.inspections.id, inspectionId));
-    if (inspection.length === 0) return c.json({ error: 'Not found' }, 404);
+    const row = await requireOwnership(edgespark, userId, inspectionId);
+    if (!row) return c.json({ error: 'Not found' }, 404);
 
-    const path = inspection[0].pdfUrl;
+    const path = (row as any).pdfUrl;
     if (!path) return c.json({ error: 'PDF not available for this inspection' }, 404);
 
     const { downloadUrl, expiresAt } = await edgespark.storage
@@ -510,12 +386,15 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ downloadUrl, expiresAt });
   });
 
-  // Get presigned upload URL for a photo
+  // Get presigned upload URL for a photo — ownership check
   app.post('/api/upload/photo', async (c) => {
     const { inspectionId, photoId, contentType } = await c.req.json();
     if (!inspectionId || !photoId) return c.json({ error: 'inspectionId and photoId required' }, 400);
 
     const userId = edgespark.auth.user!.id;
+    const row = await requireOwnership(edgespark, userId, inspectionId);
+    if (!row) return c.json({ error: 'Inspection not found' }, 404);
+
     const ext = (contentType || 'image/jpeg').includes('png') ? 'png' : 'jpg';
     const path = `photos/${userId}/${inspectionId}/${photoId}.${ext}`;
 
@@ -526,10 +405,16 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ uploadUrl, path, expiresAt });
   });
 
-  // Get presigned download URL for a photo
+  // Get presigned download URL for a photo — ownership check via path prefix
   app.get('/api/download/photo', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const path = c.req.query('path');
     if (!path) return c.json({ error: 'path query param required' }, 400);
+
+    // Verify the path belongs to this user
+    if (!path.startsWith(`photos/${userId}/`) && !path.startsWith(`reports/${userId}/`)) {
+      return c.json({ error: 'Access denied' }, 403);
+    }
 
     const { downloadUrl, expiresAt } = await edgespark.storage
       .from(buckets.meinspect_reports)
@@ -538,14 +423,19 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ downloadUrl, expiresAt });
   });
 
-  // Batch get presigned download URLs for multiple photos
+  // Batch get presigned download URLs for multiple photos — ownership check
   app.post('/api/download/photos', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const { paths } = await c.req.json();
     if (!Array.isArray(paths)) return c.json({ error: 'paths array required' }, 400);
 
     const urls = await Promise.all(
       paths.map(async (path: string) => {
         try {
+          // Verify each path belongs to this user
+          if (!path.startsWith(`photos/${userId}/`) && !path.startsWith(`reports/${userId}/`)) {
+            return { path, ok: false, error: 'Access denied' };
+          }
           const { downloadUrl, expiresAt } = await edgespark.storage
             .from(buckets.meinspect_reports)
             .createPresignedGetUrl(path, 3600);
@@ -559,12 +449,12 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     return c.json({ urls });
   });
 
-  // ==================== PAYMENT ENDPOINTS (DUMMY MODE) ====================
+  // ==================== PAYMENT ENDPOINTS ====================
 
   // Create checkout session (dummy mode - simulates Stripe)
-  // Public endpoint for demo mode
-  app.post('/api/public/checkout', async (c) => {
-    const { amount, currency = 'AED', userId = 'guest', inspectionId, discountCode, discountAmount } = await c.req.json();
+  app.post('/api/checkout', async (c) => {
+    const userId = edgespark.auth.user!.id;
+    const { amount, currency = 'AED', inspectionId, discountCode, discountAmount } = await c.req.json();
 
     const sessionId = `cs_test_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
@@ -597,11 +487,17 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
     });
   });
 
-  // Verify payment status (public for demo)
-  app.get('/api/public/checkout/:sessionId', async (c) => {
+  // Verify payment status — ownership check
+  app.get('/api/checkout/:sessionId', async (c) => {
+    const userId = edgespark.auth.user!.id;
     const sessionId = c.req.param('sessionId');
     const result = await edgespark.db.select().from(tables.orders)
-      .where(eq(tables.orders.providerSessionId, sessionId));
+      .where(
+        and(
+          eq(tables.orders.providerSessionId, sessionId),
+          eq(tables.orders.userId, userId)
+        )
+      );
     if (result.length === 0) return c.json({ error: 'Session not found' }, 404);
     return c.json({ data: result[0] });
   });
@@ -627,7 +523,7 @@ export async function createApp(edgespark: Client<typeof tables>): Promise<Hono>
       amount,
       currency,
       type,
-      provider: PROVIDER,
+      provider: 'stripe',
     }).returning();
 
     return c.json({ data: row[0] }, 201);

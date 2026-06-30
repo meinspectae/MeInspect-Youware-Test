@@ -157,6 +157,7 @@ interface InspectionState {
   currentRoomIndex: number;
   lastSyncTime: string | null;
   syncStatus: 'idle' | 'syncing' | 'synced' | 'error';
+  deletedIds: string[]; // Track locally-deleted inspection IDs to prevent resurrection from backend sync
 
   // Actions
   createInspection: (propertyType: PropertyType, counts: { bedrooms: number; bathrooms: number }) => void;
@@ -233,6 +234,7 @@ export const useInspectionStore = create<InspectionState>()(
       currentRoomIndex: 0,
       lastSyncTime: null,
       syncStatus: 'idle' as const,
+      deletedIds: [] as string[],
 
       createInspection: (propertyType, counts) => {
         const rooms = assignIds(
@@ -826,6 +828,7 @@ export const useInspectionStore = create<InspectionState>()(
 
           // Merge: backend data + local data, preferring the most recently updated
           const localInspections = state.inspections;
+          const deletedIds = state.deletedIds || [];
           const mergedMap = new Map<string, Inspection>();
 
           // Add all local inspections
@@ -833,8 +836,9 @@ export const useInspectionStore = create<InspectionState>()(
             mergedMap.set(local.id, local);
           }
 
-          // Merge backend inspections (use most recent updatedAt)
+          // Merge backend inspections (use most recent updatedAt), skip deleted ones
           for (const backend of backendInspections) {
+            if (deletedIds.includes(backend.id)) continue; // Skip resurrected inspections
             const existing = mergedMap.get(backend.id);
             if (!existing) {
               // New from backend
@@ -918,8 +922,14 @@ export const useInspectionStore = create<InspectionState>()(
       },
 
       deleteInspection: (id) => {
-        const { inspections } = get();
-        set({ inspections: inspections.filter(i => i.id !== id) });
+        const { inspections, deletedIds } = get();
+        // Remove from local state
+        set({
+          inspections: inspections.filter(i => i.id !== id),
+          deletedIds: [...deletedIds, id],
+        });
+        // Also delete from backend (fire and forget)
+        client.api.fetch(`/api/inspections/${id}`, { method: 'DELETE' }).catch(() => {});
       },
 
       getInspection: (id) => {

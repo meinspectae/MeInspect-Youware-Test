@@ -123,15 +123,12 @@ export default function PaymentModal({
 
     // Call backend dummy checkout
     try {
-      const userRaw = localStorage.getItem('meinspect_user');
-      const user = userRaw ? JSON.parse(userRaw) : null;
-      const res = await client.api.fetch('/api/public/checkout', {
+      const res = await client.api.fetch('/api/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           amount: finalAmount,
           currency: 'AED',
-          userId: user?.email || 'guest',
           inspectionId: reportId,
           discountCode: appliedDiscount?.code,
           discountAmount: appliedDiscount?.discount || 0,

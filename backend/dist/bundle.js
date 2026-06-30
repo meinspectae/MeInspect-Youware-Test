@@ -2427,8 +2427,7 @@ var paymentsRelations = relations(payments, ({ one }) => ({
 var drizzleSchema = { ...db_schema_exports, ...db_relations_exports };
 
 // src/index.ts
-import { eq } from "drizzle-orm";
-var PROVIDER = "stripe";
+import { eq, and } from "drizzle-orm";
 function getEnv() {
   return "staging";
 }
@@ -2440,170 +2439,36 @@ function tryParse(json) {
     return {};
   }
 }
+async function requireOwnership(edgespark, userId, inspectionId) {
+  const rows = await edgespark.db.select().from(db_schema_exports.inspections).where(
+    and(
+      eq(db_schema_exports.inspections.id, inspectionId),
+      eq(db_schema_exports.inspections.userId, userId)
+    )
+  );
+  if (rows.length === 0) return null;
+  return rows[0];
+}
 async function createApp(edgespark) {
   const app = new Hono2();
   app.onError((err, c) => {
     console.error("[API] error:", err);
     return c.json({ error: err instanceof Error ? err.message : "Internal error" }, 500);
   });
-  app.post("/api/public/auth/signup", async (c) => {
-    const { email, password, name, phone, location } = await c.req.json();
-    if (!email || !password || !name) {
-      return c.json({ error: "Email, password, and name are required" }, 400);
-    }
-    const existing = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, email));
-    if (existing.length > 0) {
-      return c.json({ error: "An account with this email already exists" }, 409);
-    }
-    const encoder = new TextEncoder();
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const keyMaterial = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(password),
-      { name: "PBKDF2" },
-      false,
-      ["deriveBits"]
-    );
-    const hash = await crypto.subtle.deriveBits(
-      { name: "PBKDF2", salt, iterations: 1e5, hash: "SHA-256" },
-      keyMaterial,
-      256
-    );
-    const hashArray = Array.from(new Uint8Array(hash));
-    const hashHex = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-    const saltHex = Array.from(salt).map((b) => b.toString(16).padStart(2, "0")).join("");
-    const passwordHash = `${saltHex}:${hashHex}`;
-    await edgespark.db.insert(db_schema_exports.users).values({
-      id: email,
-      email,
-      name,
-      phone: phone || "",
-      location: location || "",
-      passwordHash
-    });
-    const token = await createToken(email);
-    return c.json({
-      success: true,
-      user: { id: email, email, name },
-      token
-    });
-  });
-  app.post("/api/public/auth/login", async (c) => {
-    const { email, password } = await c.req.json();
-    if (!email || !password) {
-      return c.json({ error: "Email and password are required" }, 400);
-    }
-    const users2 = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, email));
-    if (users2.length === 0) {
-      return c.json({ error: "No account found with this email" }, 401);
-    }
-    const user = users2[0];
-    if (!user.passwordHash) {
-      return c.json({ error: "Account has no password set" }, 401);
-    }
-    const [saltHex, hashHex] = user.passwordHash.split(":");
-    const encoder = new TextEncoder();
-    const salt = new Uint8Array(saltHex.match(/.{2}/g).map((b) => parseInt(b, 16)));
-    const keyMaterial = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(password),
-      { name: "PBKDF2" },
-      false,
-      ["deriveBits"]
-    );
-    const hash = await crypto.subtle.deriveBits(
-      { name: "PBKDF2", salt, iterations: 1e5, hash: "SHA-256" },
-      keyMaterial,
-      256
-    );
-    const hashArray = Array.from(new Uint8Array(hash));
-    const computedHash = hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
-    if (computedHash !== hashHex) {
-      return c.json({ error: "Incorrect password" }, 401);
-    }
-    const token = await createToken(email);
-    return c.json({
-      success: true,
-      user: { id: user.id, email: user.email, name: user.name },
-      token
-    });
-  });
-  app.get("/api/public/auth/me", async (c) => {
-    const authHeader = c.req.header("Authorization");
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return c.json({ error: "Not authenticated" }, 401);
-    }
-    const token = authHeader.slice(7);
-    const email = await verifyToken(token);
-    if (!email) {
-      return c.json({ error: "Invalid token" }, 401);
-    }
-    const users2 = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, email));
-    if (users2.length === 0) {
-      return c.json({ error: "User not found" }, 404);
-    }
-    const user = users2[0];
-    return c.json({
-      user: { id: user.id, email: user.email, name: user.name }
-    });
-  });
-  async function createToken(email) {
-    const encoder = new TextEncoder();
-    const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-    const payload = btoa(JSON.stringify({
-      sub: email,
-      iat: Math.floor(Date.now() / 1e3),
-      exp: Math.floor(Date.now() / 1e3) + 86400 * 7
-    }));
-    const data = `${header}.${payload}`;
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode("meinspect-secret-key-2024"),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(data));
-    const sigHex = Array.from(new Uint8Array(signature)).map((b) => b.toString(16).padStart(2, "0")).join("");
-    return `${data}.${sigHex}`;
-  }
-  async function verifyToken(token) {
-    try {
-      const [header, payload, sigHex] = token.split(".");
-      if (!header || !payload || !sigHex) return null;
-      const encoder = new TextEncoder();
-      const data = `${header}.${payload}`;
-      const key = await crypto.subtle.importKey(
-        "raw",
-        encoder.encode("meinspect-secret-key-2024"),
-        { name: "HMAC", hash: "SHA-256" },
-        false,
-        ["verify"]
-      );
-      const sigBytes = new Uint8Array(sigHex.match(/.{2}/g).map((b) => parseInt(b, 16)));
-      const valid = await crypto.subtle.verify("HMAC", key, sigBytes, encoder.encode(data));
-      if (!valid) return null;
-      const payloadData = JSON.parse(atob(payload));
-      if (payloadData.exp < Math.floor(Date.now() / 1e3)) return null;
-      return payloadData.sub;
-    } catch {
-      return null;
-    }
-  }
-  app.post("/api/public/user/profile", async (c) => {
-    const { email, phone, location } = await c.req.json();
-    if (!email) return c.json({ error: "email required" }, 400);
-    const existing = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, email));
+  app.post("/api/user/profile", async (c) => {
+    const userId = edgespark.auth.user.id;
+    const { phone, location } = await c.req.json();
+    const existing = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, userId));
     if (existing.length > 0) {
       await edgespark.db.update(db_schema_exports.users).set({
-        phone: phone || existing[0].phone,
-        location: location || existing[0].location,
+        phone: phone !== void 0 ? phone : existing[0].phone,
+        location: location !== void 0 ? location : existing[0].location,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString()
-      }).where(eq(db_schema_exports.users.email, email));
+      }).where(eq(db_schema_exports.users.email, userId));
     } else {
       await edgespark.db.insert(db_schema_exports.users).values({
-        id: email,
-        email,
+        id: userId,
+        email: userId,
         name: "",
         phone: phone || "",
         location: location || ""
@@ -2611,9 +2476,9 @@ async function createApp(edgespark) {
     }
     return c.json({ success: true });
   });
-  app.get("/api/public/user/profile/:email", async (c) => {
-    const email = c.req.param("email");
-    const result = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, email));
+  app.get("/api/user/profile", async (c) => {
+    const userId = edgespark.auth.user.id;
+    const result = await edgespark.db.select().from(db_schema_exports.users).where(eq(db_schema_exports.users.email, userId));
     if (result.length === 0) return c.json({ data: null });
     return c.json({ data: result[0] });
   });
@@ -2623,10 +2488,11 @@ async function createApp(edgespark) {
     return c.json({ data: inspections2 });
   });
   app.get("/api/inspections/:id", async (c) => {
+    const userId = edgespark.auth.user.id;
     const id = c.req.param("id");
-    const result = await edgespark.db.select().from(db_schema_exports.inspections).where(eq(db_schema_exports.inspections.id, id));
-    if (result.length === 0) return c.json({ error: "Not found" }, 404);
-    return c.json({ data: result[0] });
+    const row = await requireOwnership(edgespark, userId, id);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    return c.json({ data: row });
   });
   app.post("/api/inspections", async (c) => {
     const data = await c.req.json();
@@ -2653,12 +2519,11 @@ async function createApp(edgespark) {
     return c.json({ data: inspection[0] }, 201);
   });
   app.put("/api/inspections/:id", async (c) => {
+    const userId = edgespark.auth.user.id;
     const id = c.req.param("id");
     const data = await c.req.json();
-    const existing = await edgespark.db.select().from(db_schema_exports.inspections).where(eq(db_schema_exports.inspections.id, id));
-    if (existing.length === 0) {
-      return c.json({ error: "Inspection not found" }, 404);
-    }
+    const existing = await requireOwnership(edgespark, userId, id);
+    if (!existing) return c.json({ error: "Inspection not found" }, 404);
     const updateData = { updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
     if (data.status !== void 0) updateData.status = data.status;
     if (data.generalNotes !== void 0) updateData.generalNotes = data.generalNotes;
@@ -2679,11 +2544,19 @@ async function createApp(edgespark) {
     return c.json({ success: true });
   });
   app.delete("/api/inspections/:id", async (c) => {
+    const userId = edgespark.auth.user.id;
     const id = c.req.param("id");
-    await edgespark.db.delete(db_schema_exports.inspections).where(eq(db_schema_exports.inspections.id, id));
+    const existing = await requireOwnership(edgespark, userId, id);
+    if (!existing) return c.json({ error: "Inspection not found" }, 404);
+    await edgespark.db.delete(db_schema_exports.inspections).where(
+      and(
+        eq(db_schema_exports.inspections.id, id),
+        eq(db_schema_exports.inspections.userId, userId)
+      )
+    );
     return c.json({ success: true });
   });
-  app.post("/api/public/send-email", async (c) => {
+  app.post("/api/send-email", async (c) => {
     const { to, subject, html, from } = await c.req.json();
     if (!to || !subject || !html) {
       return c.json({ error: "to, subject, and html are required" }, 400);
@@ -2773,7 +2646,12 @@ async function createApp(edgespark) {
     let updated = 0;
     for (const inspection of items2) {
       try {
-        const existing = await edgespark.db.select().from(db_schema_exports.inspections).where(eq(db_schema_exports.inspections.id, inspection.id));
+        const existing = await edgespark.db.select().from(db_schema_exports.inspections).where(
+          and(
+            eq(db_schema_exports.inspections.id, inspection.id),
+            eq(db_schema_exports.inspections.userId, userId)
+          )
+        );
         const updateData = {
           status: inspection.status,
           generalNotes: inspection.generalNotes || "",
@@ -2815,16 +2693,19 @@ async function createApp(edgespark) {
     const { inspectionId } = await c.req.json();
     if (!inspectionId) return c.json({ error: "inspectionId required" }, 400);
     const userId = edgespark.auth.user.id;
+    const row = await requireOwnership(edgespark, userId, inspectionId);
+    if (!row) return c.json({ error: "Inspection not found" }, 404);
     const path = `reports/${userId}/${inspectionId}.pdf`;
     const { uploadUrl, expiresAt } = await edgespark.storage.from(storage_schema_exports.meinspect_reports).createPresignedPutUrl(path, 3600);
     await edgespark.db.update(db_schema_exports.inspections).set({ pdfUrl: path, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }).where(eq(db_schema_exports.inspections.id, inspectionId));
     return c.json({ uploadUrl, path, expiresAt });
   });
   app.get("/api/download/pdf/:inspectionId", async (c) => {
+    const userId = edgespark.auth.user.id;
     const inspectionId = c.req.param("inspectionId");
-    const inspection = await edgespark.db.select().from(db_schema_exports.inspections).where(eq(db_schema_exports.inspections.id, inspectionId));
-    if (inspection.length === 0) return c.json({ error: "Not found" }, 404);
-    const path = inspection[0].pdfUrl;
+    const row = await requireOwnership(edgespark, userId, inspectionId);
+    if (!row) return c.json({ error: "Not found" }, 404);
+    const path = row.pdfUrl;
     if (!path) return c.json({ error: "PDF not available for this inspection" }, 404);
     const { downloadUrl, expiresAt } = await edgespark.storage.from(storage_schema_exports.meinspect_reports).createPresignedGetUrl(path, 3600);
     return c.json({ downloadUrl, expiresAt });
@@ -2833,23 +2714,33 @@ async function createApp(edgespark) {
     const { inspectionId, photoId, contentType } = await c.req.json();
     if (!inspectionId || !photoId) return c.json({ error: "inspectionId and photoId required" }, 400);
     const userId = edgespark.auth.user.id;
+    const row = await requireOwnership(edgespark, userId, inspectionId);
+    if (!row) return c.json({ error: "Inspection not found" }, 404);
     const ext = (contentType || "image/jpeg").includes("png") ? "png" : "jpg";
     const path = `photos/${userId}/${inspectionId}/${photoId}.${ext}`;
     const { uploadUrl, expiresAt } = await edgespark.storage.from(storage_schema_exports.meinspect_reports).createPresignedPutUrl(path, 3600);
     return c.json({ uploadUrl, path, expiresAt });
   });
   app.get("/api/download/photo", async (c) => {
+    const userId = edgespark.auth.user.id;
     const path = c.req.query("path");
     if (!path) return c.json({ error: "path query param required" }, 400);
+    if (!path.startsWith(`photos/${userId}/`) && !path.startsWith(`reports/${userId}/`)) {
+      return c.json({ error: "Access denied" }, 403);
+    }
     const { downloadUrl, expiresAt } = await edgespark.storage.from(storage_schema_exports.meinspect_reports).createPresignedGetUrl(path, 3600);
     return c.json({ downloadUrl, expiresAt });
   });
   app.post("/api/download/photos", async (c) => {
+    const userId = edgespark.auth.user.id;
     const { paths } = await c.req.json();
     if (!Array.isArray(paths)) return c.json({ error: "paths array required" }, 400);
     const urls = await Promise.all(
       paths.map(async (path) => {
         try {
+          if (!path.startsWith(`photos/${userId}/`) && !path.startsWith(`reports/${userId}/`)) {
+            return { path, ok: false, error: "Access denied" };
+          }
           const { downloadUrl, expiresAt } = await edgespark.storage.from(storage_schema_exports.meinspect_reports).createPresignedGetUrl(path, 3600);
           return { path, downloadUrl, expiresAt, ok: true };
         } catch {
@@ -2859,8 +2750,9 @@ async function createApp(edgespark) {
     );
     return c.json({ urls });
   });
-  app.post("/api/public/checkout", async (c) => {
-    const { amount, currency = "AED", userId = "guest", inspectionId, discountCode, discountAmount } = await c.req.json();
+  app.post("/api/checkout", async (c) => {
+    const userId = edgespark.auth.user.id;
+    const { amount, currency = "AED", inspectionId, discountCode, discountAmount } = await c.req.json();
     const sessionId = `cs_test_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const order = await edgespark.db.insert(db_schema_exports.orders).values({
       environment: getEnv(),
@@ -2884,9 +2776,15 @@ async function createApp(edgespark) {
       message: "Dummy payment processed successfully"
     });
   });
-  app.get("/api/public/checkout/:sessionId", async (c) => {
+  app.get("/api/checkout/:sessionId", async (c) => {
+    const userId = edgespark.auth.user.id;
     const sessionId = c.req.param("sessionId");
-    const result = await edgespark.db.select().from(db_schema_exports.orders).where(eq(db_schema_exports.orders.providerSessionId, sessionId));
+    const result = await edgespark.db.select().from(db_schema_exports.orders).where(
+      and(
+        eq(db_schema_exports.orders.providerSessionId, sessionId),
+        eq(db_schema_exports.orders.userId, userId)
+      )
+    );
     if (result.length === 0) return c.json({ error: "Session not found" }, 404);
     return c.json({ data: result[0] });
   });
@@ -2904,7 +2802,7 @@ async function createApp(edgespark) {
       amount,
       currency,
       type,
-      provider: PROVIDER
+      provider: "stripe"
     }).returning();
     return c.json({ data: row[0] }, 201);
   });

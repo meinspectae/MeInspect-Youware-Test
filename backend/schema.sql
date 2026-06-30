@@ -1,4 +1,7 @@
 -- MeInspect Database Schema
+-- DEPRECATED: This file is a legacy normalized schema from early development.
+-- The app actually uses denormalized JSON blob columns defined in backend/src/__generated__/.
+-- This file is kept for reference only. Do not use for new deployments.
 -- Cloudflare D1 (SQLite) with STRICT mode
 
 -- Users table (synced from Youware auth)

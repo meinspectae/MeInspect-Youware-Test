@@ -59,6 +59,11 @@ export default function InspectionForm() {
     removePhotoFromPropertyItem,
   } = useInspectionStore();
 
+  // All useState hooks MUST be declared before any early returns (React Rules of Hooks)
+  const REPORT_PRICE = 500;
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentCompleted, setPaymentCompleted] = useState(currentInspection?.payment?.paid || false);
+
   if (!currentInspection) {
     navigate('/new');
     return null;
@@ -86,9 +91,6 @@ export default function InspectionForm() {
   const allSignaturesCollected = currentInspection.signatures.length >= 3;
   const isRoomStep = typeof currentStepKey === 'string' && currentStepKey.startsWith('room_');
   const currentRoomIdx = isRoomStep ? parseInt(currentStepKey.split('_')[1]) : -1;
-  const REPORT_PRICE = 500;
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentCompleted, setPaymentCompleted] = useState(currentInspection.payment?.paid || false);
 
   // Validation for each step
   const isPropertyValid = (): boolean => {
@@ -96,10 +98,19 @@ export default function InspectionForm() {
     return !!(p.makaniNumber && p.area && p.city);
   };
 
+  const isEmailValid = (email: string): boolean => {
+    if (!email || email.trim().length === 0) return false;
+    // Basic but sufficient email format check
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  };
+
   const isPartiesValid = (): boolean => {
     const t = currentInspection.tenant;
     const l = currentInspection.landlord;
-    return !!(t.name && t.phone && t.email && l.name && l.phone && l.email);
+    return !!(
+      t.name && t.phone && isEmailValid(t.email) &&
+      l.name && l.phone && isEmailValid(l.email)
+    );
   };
 
   const isTenancyValid = (): boolean => {
@@ -147,6 +158,16 @@ export default function InspectionForm() {
 
   const canProceed = (): boolean => getValidationError() === null;
 
+  // Check if a specific step (by index) has valid data up to that point
+  const canJumpToStep = (targetStep: number): boolean => {
+    // Always allow going backwards
+    if (targetStep <= currentStep) return true;
+    // Allow going forward one step at a time only
+    if (targetStep === currentStep + 1) return canProceed();
+    // Block jumping ahead more than one step
+    return false;
+  };
+
   const goNext = () => {
     // Don't allow going forward if inspection is completed
     if (currentInspection?.status === 'completed') return;
@@ -180,6 +201,10 @@ export default function InspectionForm() {
     if (currentInspection.status === 'completed') {
       // Already completed, just navigate to report
       navigate(`/report/${currentInspection.id}`);
+      return;
+    }
+    // Enforce payment before completion
+    if (!paymentCompleted && !currentInspection.payment?.paid) {
       return;
     }
     const id = currentInspection.id;
@@ -241,23 +266,28 @@ export default function InspectionForm() {
 
         {/* Step Indicator */}
         <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto pb-2">
-          {steps.map((step, i) => (
-            <button
-              key={step.key}
-              onClick={() => setCurrentStep(i)}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium whitespace-nowrap transition-all ${
-                i === currentStep
-                  ? 'bg-blue-600 text-white shadow-md shadow-blue-500/25'
-                  : i < currentStep
-                  ? 'bg-blue-50 text-blue-700'
-                  : 'bg-slate-100 text-slate-500'
-              }`}
-            >
-              <span>{step.icon}</span>
-              <span className="hidden sm:inline">{step.label}</span>
-              <span className="sm:hidden">{i + 1}</span>
-            </button>
-          ))}
+          {steps.map((step, i) => {
+            const canJump = canJumpToStep(i);
+            const isAccessible = i <= currentStep || (i === currentStep + 1 && canProceed());
+            return (
+              <button
+                key={step.key}
+                onClick={() => isAccessible && setCurrentStep(i)}
+                disabled={!isAccessible}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium whitespace-nowrap transition-all ${
+                  i === currentStep
+                    ? 'bg-blue-600 text-white shadow-md shadow-blue-500/25'
+                    : isAccessible
+                    ? 'bg-blue-50 text-blue-700 hover:bg-blue-100 cursor-pointer'
+                    : 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60'
+                }`}
+              >
+                <span>{step.icon}</span>
+                <span className="hidden sm:inline">{step.label}</span>
+                <span className="sm:hidden">{i + 1}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -384,14 +414,18 @@ export default function InspectionForm() {
           ) : (
             <button
               onClick={handleComplete}
-              disabled={!allSignaturesCollected}
+              disabled={!allSignaturesCollected || (!paymentCompleted && !currentInspection.payment?.paid)}
               className={`px-6 py-2.5 rounded-xl text-sm font-semibold transition-all active:scale-[0.98] ${
-                allSignaturesCollected
+                allSignaturesCollected && (paymentCompleted || currentInspection.payment?.paid)
                   ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-md shadow-emerald-500/25'
                   : 'bg-slate-200 text-slate-400 cursor-not-allowed'
               }`}
             >
-              {allSignaturesCollected ? 'Complete & Generate Report ✓' : 'Signatures Required'}
+              {!allSignaturesCollected
+                ? 'Signatures Required'
+                : (!paymentCompleted && !currentInspection.payment?.paid)
+                ? 'Payment Required'
+                : 'Complete & Generate Report ✓'}
             </button>
           )}
         </div>
@@ -652,6 +686,9 @@ function SingleRoomStep({
                       {item.photos.map((photo: Photo) => (
                         <div key={photo.id} className="relative flex-shrink-0 group">
                           <img src={photo.url} alt="" className="w-16 h-16 object-cover rounded-lg border border-slate-200" />
+                          {(photo.gpsLat === undefined || photo.gpsLat === null) && (
+                            <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-amber-500 text-white rounded-full text-[7px] flex items-center justify-center" title="No GPS data">⚠</div>
+                          )}
                           <button onClick={() => onRemovePhotoFromItem(roomIndex, item.id, photo.id)}
                             className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">×</button>
                         </div>
@@ -809,6 +846,9 @@ function KeysStep({
                 {item.photos.map((photo: Photo) => (
                   <div key={photo.id} className="relative flex-shrink-0 group">
                     <img src={photo.url} alt="" className="w-20 h-20 object-cover rounded-lg border border-slate-200" />
+                    {(photo.gpsLat === undefined || photo.gpsLat === null) && (
+                      <div className="absolute -bottom-0.5 -right-0.5 w-5 h-5 bg-amber-500 text-white rounded-full text-[8px] flex items-center justify-center" title="No GPS data">⚠</div>
+                    )}
                     <button onClick={() => onRemovePhotoFromPropertyItem(item.id, photo.id)}
                       className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">×</button>
                   </div>
@@ -818,377 +858,6 @@ function KeysStep({
           </div>
         </div>
       ))}
-    </div>
-  );
-}
-
-// Rooms Step (legacy tabbed view)
-function RoomsStep({
-  rooms, currentRoomIndex, onSetRoomIndex,
-  onUpdateItemCondition, onUpdateItemComments, onToggleItemChecked,
-  onAddPhotoToItem, onRemovePhotoFromItem,
-  onUpdateRoomComments,
-  onAddRoom, onRemoveRoom, onAddItem, onRemoveItem,
-}: {
-  rooms: any[]; currentRoomIndex: number; onSetRoomIndex: (i: number) => void;
-  onUpdateItemCondition: (ri: number, itemId: string, c: ConditionRating) => void;
-  onUpdateItemComments: (ri: number, itemId: string, c: string) => void;
-  onToggleItemChecked: (ri: number, itemId: string) => void;
-  onAddPhotoToItem: (ri: number, itemId: string, p: Photo) => void;
-  onRemovePhotoFromItem: (ri: number, itemId: string, pid: string) => void;
-  onUpdateRoomComments: (ri: number, c: string) => void;
-  onAddRoom: (room: Room) => void;
-  onRemoveRoom: (ri: number) => void;
-  onAddItem: (ri: number, item: InspectionItem) => void;
-  onRemoveItem: (ri: number, itemId: string) => void;
-}) {
-  const [expandedItem, setExpandedItem] = useState<string | null>(null);
-  const [showAddRoom, setShowAddRoom] = useState(false);
-  const [newRoomName, setNewRoomName] = useState('');
-  const [newRoomIcon, setNewRoomIcon] = useState('🏠');
-  const [newItemName, setNewItemName] = useState('');
-  const [showAddItem, setShowAddItem] = useState(false);
-  const room = rooms[currentRoomIndex];
-  const completedRooms = rooms.filter(r => r.items.filter((i: any) => i.name !== 'General').every((i: any) => i.checked)).length;
-
-  const handlePhoto = async (itemId: string) => {
-    const photo = await capturePhoto();
-    if (!photo) return;
-    onAddPhotoToItem(currentRoomIndex, itemId, photo);
-  };
-
-  const handleAddRoom = () => {
-    if (!newRoomName.trim()) return;
-    onAddRoom({
-      id: '',
-      name: newRoomName.trim(),
-      type: newRoomName.toLowerCase().replace(/[^a-z0-9]/g, '_'),
-      icon: newRoomIcon,
-      items: [{
-        id: 'general',
-        name: 'General',
-        category: 'general',
-        condition: null,
-        comments: '',
-        photos: [],
-        checked: false,
-      }],
-      overallComments: '',
-      overallCondition: null,
-    });
-    setNewRoomName('');
-    setShowAddRoom(false);
-  };
-
-  const handleAddItem = () => {
-    if (!newItemName.trim()) return;
-    onAddItem(currentRoomIndex, {
-      id: '',
-      name: newItemName.trim(),
-      category: 'custom',
-      condition: null,
-      comments: '',
-      photos: [],
-      checked: false,
-    });
-    setNewItemName('');
-    setShowAddItem(false);
-  };
-
-  if (!room) return null;
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold text-slate-800 mb-1">Room Inspection</h2>
-        <p className="text-sm text-slate-400">
-          {completedRooms} of {rooms.length} rooms completed
-        </p>
-        {/* Progress bar */}
-        <div className="mt-2 h-2 bg-slate-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 rounded-full transition-all duration-500"
-            style={{ width: `${rooms.length > 0 ? (completedRooms / rooms.length) * 100 : 0}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Room Tabs */}
-      <div className="flex gap-1.5 overflow-x-auto pb-2 -mx-2 px-2">
-        {rooms.map((r: any, i: number) => {
-          const nonGeneralItems = r.items.filter((item: any) => item.name !== 'General');
-          const allChecked = nonGeneralItems.length > 0 && nonGeneralItems.every((item: any) => item.checked);
-          return (
-            <button
-              key={r.id}
-              onClick={() => onSetRoomIndex(i)}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap transition-all flex-shrink-0 ${
-                i === currentRoomIndex
-                  ? 'bg-blue-600 text-white shadow-md'
-                  : allChecked
-                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              <span>{r.icon}</span>
-              <span>{r.name}</span>
-              {allChecked && <span>✓</span>}
-            </button>
-          );
-        })}
-        <button
-          onClick={() => setShowAddRoom(true)}
-          className="flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap bg-blue-50 text-blue-600 border border-dashed border-blue-300 hover:bg-blue-100 transition-all flex-shrink-0"
-        >
-          + Add Room
-        </button>
-      </div>
-
-      {/* Add Room Modal */}
-      {showAddRoom && (
-        <div className="p-4 bg-blue-50 rounded-xl border border-blue-200 space-y-3">
-          <h4 className="text-sm font-semibold text-blue-800">Add New Room</h4>
-          <div className="flex gap-3 items-end">
-            <div className="flex-1">
-              <label className="text-xs font-medium text-slate-600 block mb-1">Room Name</label>
-              <input
-                type="text"
-                value={newRoomName}
-                onChange={(e) => setNewRoomName(e.target.value)}
-                placeholder="e.g., Study Room"
-                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                onKeyDown={(e) => e.key === 'Enter' && handleAddRoom()}
-              />
-            </div>
-            <div>
-              <label className="text-xs font-medium text-slate-600 block mb-1">Icon</label>
-              <div className="flex gap-1 flex-wrap max-w-[200px]">
-                {roomIcons.map((icon) => (
-                  <button
-                    key={icon}
-                    onClick={() => setNewRoomIcon(icon)}
-                    className={`w-8 h-8 rounded-lg text-sm flex items-center justify-center transition-all ${
-                      newRoomIcon === icon ? 'bg-blue-600 shadow-md scale-110' : 'bg-white hover:bg-slate-100 border border-slate-200'
-                    }`}
-                  >
-                    {icon}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <button onClick={handleAddRoom} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-all">
-              Add Room
-            </button>
-            <button onClick={() => { setShowAddRoom(false); setNewRoomName(''); }} className="px-4 py-2 bg-white text-slate-600 rounded-lg text-sm font-medium hover:bg-slate-50 border border-slate-200 transition-all">
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Room Content */}
-      <div className="bg-slate-50 rounded-xl p-5 border border-slate-100">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-base font-semibold text-slate-800 flex items-center gap-2">
-            <span className="text-xl">{room.icon}</span>
-            {room.name}
-          </h3>
-          <div className="flex items-center gap-3">
-            <span className="text-xs text-slate-400">
-              {room.items.filter((i: any) => i.name !== 'General' && i.checked).length}/{room.items.filter((i: any) => i.name !== 'General').length} items
-            </span>
-            <button
-              onClick={() => {
-                if (confirm(`Remove "${room.name}"? This cannot be undone.`)) {
-                  onRemoveRoom(currentRoomIndex);
-                }
-              }}
-              className="text-xs text-red-400 hover:text-red-600 font-medium transition-colors"
-            >
-              🗑️ Remove Room
-            </button>
-          </div>
-        </div>
-
-        {/* Items */}
-        <div className="space-y-2">
-          {room.items.map((item: any) => (
-            <div
-              key={item.id}
-              className={`bg-white rounded-xl border transition-all ${
-                item.checked ? 'border-emerald-200' : 'border-slate-200'
-              }`}
-            >
-              <div
-                className="flex items-center gap-3 p-3 cursor-pointer"
-                onClick={() => setExpandedItem(expandedItem === item.id ? null : item.id)}
-              >
-                <button
-                  onClick={(e) => { e.stopPropagation(); onToggleItemChecked(currentRoomIndex, item.id); }}
-                  className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-all ${
-                    item.checked
-                      ? 'bg-emerald-500 border-emerald-500'
-                      : 'border-slate-300 hover:border-slate-400'
-                  }`}
-                >
-                  {item.checked && (
-                    <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                    </svg>
-                  )}
-                </button>
-
-                <div className="flex-1 min-w-0">
-                  <span className="text-sm font-medium text-slate-700">{item.name}</span>
-                </div>
-
-                {item.condition && (
-                  <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                    conditionOptions.find(c => c.value === item.condition)?.activeColor || ''
-                  }`}>
-                    {item.condition}
-                  </span>
-                )}
-
-                {item.photos.length > 0 && (
-                  <span className="text-xs text-slate-400">📷 {item.photos.length}</span>
-                )}
-
-                {/* Delete button for non-General items */}
-                {item.name !== 'General' && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (confirm(`Remove "${item.name}"?`)) {
-                        onRemoveItem(currentRoomIndex, item.id);
-                      }
-                    }}
-                    className="text-red-400 hover:text-red-600 transition-colors p-1"
-                    title="Delete item"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
-                )}
-
-                <svg className={`w-4 h-4 text-slate-400 transition-transform ${
-                  expandedItem === item.id ? 'rotate-180' : ''
-                }`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </div>
-
-              {/* Expanded */}
-              {expandedItem === item.id && (
-                <div className="px-3 pb-3 border-t border-slate-100 pt-3 space-y-3">
-                  {/* Condition */}
-                  <div>
-                    <span className="text-xs font-medium text-slate-500 block mb-2">Condition Rating *</span>
-                    <div className="flex flex-wrap gap-1.5">
-                      {conditionOptions.map((opt) => (
-                        <button
-                          key={opt.value}
-                          onClick={() => onUpdateItemCondition(currentRoomIndex, item.id, opt.value)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
-                            item.condition === opt.value ? opt.activeColor : opt.color
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Comments */}
-                  <div>
-                    <span className="text-xs font-medium text-slate-500 block mb-1">Comments *</span>
-                    <textarea
-                      value={item.comments}
-                      onChange={(e) => onUpdateItemComments(currentRoomIndex, item.id, e.target.value)}
-                      placeholder="Add notes about this item..."
-                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm text-slate-700 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-                      rows={2}
-                    />
-                  </div>
-
-                  {/* Photos */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-medium text-slate-500">Photos *</span>
-                      <button
-                        onClick={() => handlePhoto(item.id)}
-                        className="text-xs text-blue-600 hover:text-blue-700 font-medium"
-                      >
-                        📷 Add Photo
-                      </button>
-                    </div>
-                    {item.photos.length > 0 && (
-                      <div className="flex gap-2 overflow-x-auto pb-1">
-                        {item.photos.map((photo: Photo) => (
-                          <div key={photo.id} className="relative flex-shrink-0 group">
-                            <img src={photo.url} alt="" className="w-16 h-16 object-cover rounded-lg border border-slate-200" />
-                            <button
-                              onClick={() => onRemovePhotoFromItem(currentRoomIndex, item.id, photo.id)}
-                              className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                            >
-                              ×
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Add Item */}
-        <div className="mt-3">
-          {showAddItem ? (
-            <div className="flex gap-2 items-center p-3 bg-white rounded-xl border border-blue-200">
-              <input
-                type="text"
-                value={newItemName}
-                onChange={(e) => setNewItemName(e.target.value)}
-                placeholder="Item name (e.g., Bookshelf)"
-                className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                onKeyDown={(e) => e.key === 'Enter' && handleAddItem()}
-                autoFocus
-              />
-              <button onClick={handleAddItem} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700 transition-all">
-                Add
-              </button>
-              <button onClick={() => { setShowAddItem(false); setNewItemName(''); }} className="px-3 py-2 bg-slate-100 text-slate-600 rounded-lg text-xs font-medium hover:bg-slate-200 transition-all">
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setShowAddItem(true)}
-              className="w-full py-2 border-2 border-dashed border-slate-200 rounded-xl text-sm text-slate-400 hover:text-blue-600 hover:border-blue-300 transition-all font-medium"
-            >
-              + Add Custom Item
-            </button>
-          )}
-        </div>
-
-        {/* Room Comments */}
-        <div className="mt-4">
-          <span className="text-xs font-medium text-slate-500 block mb-1">Room General Notes</span>
-          <textarea
-            value={room.overallComments}
-            onChange={(e) => onUpdateRoomComments(currentRoomIndex, e.target.value)}
-            placeholder="Overall notes for this room..."
-            className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm text-slate-700 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
-            rows={2}
-          />
-        </div>
-      </div>
     </div>
   );
 }
@@ -1385,6 +1054,9 @@ function ReviewStep({
             {inspection.overallPhotos.map((photo: Photo) => (
               <div key={photo.id} className="relative flex-shrink-0 group">
                 <img src={photo.url} alt="" className="w-24 h-24 object-cover rounded-lg border border-slate-200" />
+                {(photo.gpsLat === undefined || photo.gpsLat === null) && (
+                  <div className="absolute -bottom-0.5 -right-0.5 w-5 h-5 bg-amber-500 text-white rounded-full text-[8px] flex items-center justify-center" title="No GPS data">⚠</div>
+                )}
                 <button
                   onClick={() => onRemoveOverallPhoto(photo.id)}
                   className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"

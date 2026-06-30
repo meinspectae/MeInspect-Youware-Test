@@ -85,10 +85,10 @@ export default function SignUpPage() {
 
         // Save phone & location to users table
         try {
-          await fetch('https://staging--olkmxpl1sliijytnc48w.youbase.cloud/api/public/user/profile', {
+          await client.api.fetch('/api/user/profile', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, phone, location }),
+            body: JSON.stringify({ phone, location }),
           });
         } catch (profileErr) {
           console.warn('Failed to save profile data:', profileErr);
