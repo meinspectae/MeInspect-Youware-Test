@@ -1,0 +1,14 @@
+{
+  "name": "meinspect-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.0.0",
+    "stripe": "^22.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

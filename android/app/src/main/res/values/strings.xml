@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">MeInspect</string>
+    <string name="title_activity_main">MeInspect</string>
+    <string name="package_name">com.meinspect.app</string>
+    <string name="custom_url_scheme">com.meinspect.app</string>
+</resources>
